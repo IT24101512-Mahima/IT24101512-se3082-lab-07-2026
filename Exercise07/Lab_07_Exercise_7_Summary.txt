@@ -1,0 +1,378 @@
+Lab 07 – Exercise 7: Summary Comparison
+
+1. Comparison of the Six Programs
+=================================
+
+All six programs calculate the sum of integers from 1 to 1,000,000.
+
+Correct result:
+500,000,500,000
+
+Program          | Collectives Used                  | Array Allocation                         | Manual Sum Needed?                  | Result Available
+-----------------|-----------------------------------|-------------------------------------------|-------------------------------------|--------------------------
+sum_bcast        | MPI_Bcast + MPI_Send/MPI_Recv    | Every process: FULL array (N)             | Yes – root receives and adds        | Root only
+sum_scatter      | MPI_Scatter + MPI_Send/MPI_Recv  | Root: full; others: N/P chunk             | Yes – root receives and adds        | Root only
+sum_gather       | MPI_Scatter + MPI_Gather         | Root: full; others: N/P chunk             | Yes – root loops through all_sums[] | Root only
+sum_reduce       | MPI_Scatter + MPI_Reduce         | Root: full; others: N/P chunk             | No – MPI_Reduce performs the sum    | Root only
+sum_allreduce    | MPI_Scatter + MPI_Allreduce      | Root: full; others: N/P chunk             | No                                  | All processes
+sum_scan         | MPI_Scatter + MPI_Scan           | Root: full; others: N/P chunk             | No                                  | Different on each rank
+
+Key difference:
+- Bcast: everyone receives the entire array.
+- Scatter: each process receives only its required portion.
+- Gather: partial results are collected at the root.
+- Reduce: partial results are combined into one result at the root.
+- Allreduce: the combined result is available to everyone.
+- Scan: every process receives a cumulative/prefix result.
+
+
+2. Execution Time Comparison
+============================
+
+Program          | NP = 2  | NP = 4  | NP = 8
+-----------------|---------|---------|---------
+sum_bcast        | 0.0030  | 0.0076  | 0.0060
+sum_scatter      | 0.0038  | 0.0034  | 0.0015
+sum_gather       | 0.0031  | 0.0034  | 0.0015
+sum_reduce       | 0.0031  | 0.0034  | 0.0031
+sum_allreduce    | 0.0032  | 0.0059  | 0.0055
+sum_scan         | 0.0067  | 0.0118  | 0.0064
+
+These are individual measurements, so small differences should not be treated as
+definitive performance differences. System scheduling, WSL overhead, background
+processes, and MPI implementation can affect such small timings.
+
+
+3. Performance Analysis
+=======================
+
+MPI_Bcast – sum_bcast
+---------------------
+The Bcast version is comparatively slower, especially as the number of processes
+increases.
+
+The reason is that every process receives the complete array of 1,000,000
+integers, even though each process only needs a fraction of the array.
+
+For example, with 8 processes:
+- Total elements = 1,000,000
+- Each process needs approximately 125,000 elements
+- MPI_Bcast gives every process all 1,000,000 elements
+
+Therefore, a large amount of unnecessary data is communicated.
+
+Every process also needs memory for the complete array.
+
+
+MPI_Scatter – sum_scatter
+-------------------------
+MPI_Scatter improves the situation because the array is divided among the
+processes.
+
+For example, with 8 processes:
+
+1,000,000 / 8 = 125,000 elements per process
+
+Each process receives only its own portion and calculates its local sum.
+
+This reduces the amount of data each process needs to receive and reduces memory
+requirements for non-root processes.
+
+The root still needs the complete original array.
+
+
+MPI_Gather – sum_gather
+-----------------------
+MPI_Gather is similar to the Scatter approach for the initial distribution.
+
+The sequence is:
+
+Scatter -> Local Calculation -> Gather
+
+Each process:
+1. Receives its chunk.
+2. Calculates its local sum.
+3. Sends the local sum to the root.
+
+The root receives all partial sums in all_sums[] and manually adds them.
+
+Only one partial sum per process needs to be gathered, so the amount of data
+involved in the final communication is very small compared with broadcasting
+the original array.
+
+
+MPI_Reduce – sum_reduce
+-----------------------
+MPI_Reduce improves on MPI_Gather because the root does not need to manually
+add all the partial sums.
+
+The sequence is:
+
+Scatter -> Local Calculation -> Reduce using MPI_SUM
+
+MPI itself combines the partial results.
+
+Reduction algorithms can combine values efficiently using tree-based
+communication, often requiring approximately O(log P) communication steps.
+
+
+MPI_Allreduce – sum_allreduce
+-----------------------------
+MPI_Allreduce performs the reduction and makes the final result available to
+every process.
+
+Conceptually:
+
+Process 0 Process 1  Process 2   ---> MPI_Allreduce ---> Total available to everyone
+Process 3  /
+
+This is useful when every process needs the same global value.
+
+However, because the result must be distributed to all processes, it can involve
+more communication than MPI_Reduce, where only the root needs the final answer.
+
+
+MPI_Scan – sum_scan
+-------------------
+MPI_Scan produces a prefix/cumulative result rather than one identical global
+result.
+
+For example, suppose the local sums are:
+
+Rank 0 = 10
+Rank 1 = 20
+Rank 2 = 30
+Rank 3 = 40
+
+MPI_Scan produces:
+
+Rank 0 -> 10
+Rank 1 -> 30       (10 + 20)
+Rank 2 -> 60       (10 + 20 + 30)
+Rank 3 -> 100      (10 + 20 + 30 + 40)
+
+The final rank receives the overall total, but the other ranks receive their
+own cumulative values.
+
+This is different from MPI_Allreduce, where every rank would receive:
+
+Rank 0 -> 100
+Rank 1 -> 100
+Rank 2 -> 100
+Rank 3 -> 100
+
+The timing results show that MPI_Scan was relatively expensive in these
+experiments.
+
+
+4. Why Does MPI_Scatter Generally Perform Better Than MPI_Bcast?
+================================================================
+
+The important difference is how much data each process receives.
+
+MPI_Bcast:
+    Full array
+        |
+    +---+---+---+
+    P0  P1  P2  ... Pn
+
+Every process receives the entire 1,000,000-element array.
+
+MPI_Scatter:
+    Full array
+         |
+    +----+----+----+----+
+    P0   P1   P2   P3   ...
+
+The array is divided, so each process receives only its own portion.
+
+With P processes:
+
+Bcast:
+Each process receives approximately N elements.
+
+Scatter:
+Each process receives approximately N/P elements.
+
+Therefore, Scatter is more appropriate when each process only needs a portion
+of a large dataset.
+
+
+5. Why Are sum_scatter, sum_gather, and sum_reduce Close in Performance?
+=========================================================================
+
+Once the array has been scattered, the expensive part of the operation is
+largely the distribution of the 1,000,000 elements.
+
+The final result communication is comparatively tiny because each process only
+sends one long long value.
+
+For example, with 8 processes:
+
+1,000,000 array elements
+        |
+     Scatter
+        |
+8 local sums
+        |
+Only 8 long long values
+        |
+Gather / Reduce
+
+Therefore, the difference between Gather and Reduce can be very small when
+using only a few processes on one machine.
+
+The measured results should be interpreted carefully rather than assuming that
+a difference of a few milliseconds proves one implementation is fundamentally
+faster.
+
+
+6. Why Does Execution Time Sometimes Increase When More Processes Are Used?
+============================================================================
+
+Parallel processing does not guarantee that execution time will continuously
+decrease as more processes are added.
+
+Reasons include:
+
+1. Communication overhead
+   Processes must communicate using MPI. More processes can mean more
+   communication.
+
+2. Process-management overhead
+   Creating and coordinating additional processes requires work.
+
+3. WSL / operating-system scheduling
+   The experiments were performed on a laptop using WSL, so other applications
+   and operating-system scheduling can influence the measurements.
+
+4. Very small execution times
+   The programs complete in only a few milliseconds. At this scale, even small
+   system variations can significantly affect the measured result.
+
+A better experiment would run each configuration multiple times and calculate
+an average.
+
+
+7. Which Approach Should Be Used?
+==================================
+
+Requirement                                      | Appropriate Collective
+-------------------------------------------------|-------------------------
+Everyone needs the entire dataset                | MPI_Bcast
+Divide a dataset among processes                  | MPI_Scatter
+Send partial results to root                     | MPI_Gather
+Combine partial results into one result at root  | MPI_Reduce
+Combine results and give total to everyone       | MPI_Allreduce
+Give each process a cumulative/prefix result     | MPI_Scan
+
+There is no single collective that is always the fastest or best. The
+appropriate operation depends on the required communication pattern and where
+the result is needed.
+
+
+8. Thinking Question: When Would You Choose MPI_Scan Over MPI_Allreduce?
+=========================================================================
+
+Choose MPI_Scan when each process needs a cumulative value based on the
+processes before it.
+
+Choose MPI_Allreduce when every process needs the same final global value.
+
+Example: Parallel File/Array Output
+-----------------------------------
+
+Suppose 8 processes are processing different portions of a dataset.
+
+Each process finds a different number of records that satisfy a condition:
+
+Rank 0 -> 5 records
+Rank 1 -> 8 records
+Rank 2 -> 3 records
+Rank 3 -> 7 records
+
+If all processes need to write their results into one shared output array,
+they need to know where their section should begin.
+
+Using MPI_Scan:
+
+Local count      Prefix result
+--------------------------------
+Rank 0: 5   ->       5
+Rank 1: 8   ->      13
+Rank 2: 3   ->      16
+Rank 3: 7   ->      23
+
+The starting position can be calculated as:
+
+starting offset = prefix sum - local count
+
+Therefore:
+
+Rank 0 -> 5  - 5 = 0
+Rank 1 -> 13 - 8 = 5
+Rank 2 -> 16 - 3 = 13
+Rank 3 -> 23 - 7 = 16
+
+So the processes can write:
+
+Rank 0 -> positions 0-4
+Rank 1 -> positions 5-12
+Rank 2 -> positions 13-15
+Rank 3 -> positions 16-22
+
+There are no overlaps or gaps.
+
+MPI_Allreduce would only give every process the total number of records (23).
+It would not tell Rank 2 that it should start at position 13.
+
+Note:
+MPI_Exscan is another MPI operation specifically designed to provide the
+exclusive prefix value, so it can be even more directly suited to calculating
+each process's starting offset.
+
+
+9. Final Exam/Report Takeaway
+=============================
+
+The six programs demonstrate different MPI communication patterns:
+
+MPI_Bcast
+    ->
+Everyone gets the FULL data
+
+MPI_Scatter
+    ->
+Each process gets a PART of the data
+
+MPI_Gather
+    ->
+Partial results -> ROOT
+
+MPI_Reduce
+    ->
+Partial results -> ONE combined result at ROOT
+
+MPI_Allreduce
+    ->
+Partial results -> SAME combined result on EVERY process
+
+MPI_Scan
+    ->
+Partial results -> DIFFERENT cumulative result on EACH process
+
+The most important conceptual distinction is:
+
+Reduce    = one global result at root
+Allreduce = one global result everywhere
+Scan      = different prefix/cumulative result for each process
+
+Main performance lesson:
+
+Scatter-based approaches avoid unnecessarily sending the entire 1,000,000-
+element array to every process, making them generally more suitable than the
+Bcast approach for this problem.
+
+Small differences among Scatter/Gather/Reduce/Allreduce/Scan timings should
+be interpreted cautiously because the experiments involve very short runtimes
+and a small number of processes.
